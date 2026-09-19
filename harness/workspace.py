@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import shutil
 from pathlib import Path
 
 from .config import APPS_DATA, TASK_FILES, WORLD_FS
@@ -15,13 +15,17 @@ def mount_workspace(dest: Path, slug: str) -> list[dict]:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() or target.is_symlink():
             return
-        os.symlink(src, target)
+        # Copy file instead of creating symlink — avoids Windows privilege (WinError 1314) checks
+        if src.is_file():
+            shutil.copy2(src, target)
+        elif src.is_dir():
+            shutil.copytree(src, target, dirs_exist_ok=True)
         linked.append(
             {
                 "path": str(rel).replace("\\", "/"),
                 "origin": origin,
-                "bytes": src.stat().st_size if src.is_file() else 0,
-                "dir": src.is_dir(),
+                "bytes": target.stat().st_size if target.is_file() else 0,
+                "dir": target.is_dir(),
             }
         )
 

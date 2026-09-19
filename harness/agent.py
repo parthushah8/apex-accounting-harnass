@@ -244,7 +244,7 @@ class LoopHarness:
             choice = resp.choices[0]
             msg = choice.message
             text = msg.content or ""
-            reasoning = getattr(msg, "reasoning") or getattr(msg, "reasoning_content", None)
+            reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
             if reasoning:
                 await self.emit({"type": "llm_thinking", "step": step, "text": reasoning})
             if text:

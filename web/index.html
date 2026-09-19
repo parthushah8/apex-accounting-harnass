@@ -3,37 +3,230 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>apex-accounting-harness.ai</title>
+  <title>APEX Accounting · Agent Workbench</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;650&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div id="session" class="screen">
-    <header class="sess-top">
-      <div class="sess-meta">
-        <h1>apex-accounting-harness.ai</h1>
-        <strong id="sess-name"></strong>
-        <span id="sess-live">drawing a task</span>
+  <div class="app">
+    <!-- LEFT: Task / Workspace -->
+    <aside class="panel left" id="panel-left">
+      <div class="left-inner">
+        <div class="brand">
+          <div class="brand-mark">AP</div>
+          <div>
+            <div class="brand-name">APEX Accounting</div>
+            <div class="brand-sub">Agent Workbench</div>
+          </div>
+        </div>
+
+        <!-- 1. Task -->
+        <section class="block">
+          <div class="block-head">
+            <h2>APEX Task</h2>
+            <button type="button" class="linkish" id="btn-new-run">New Run</button>
+          </div>
+          <div class="card">
+            <label class="field tight">
+              <span>Task</span>
+              <select id="sel-task" class="task-select"></select>
+            </label>
+            <div class="task-meta-row">
+              <span class="pill" id="task-id">—</span>
+              <span class="pill soft" id="task-category">—</span>
+            </div>
+            <div class="setup-actions">
+              <button type="button" class="btn primary" id="btn-start">Start Run</button>
+              <button type="button" class="btn ghost" id="btn-random">Random Task</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 2. Task Instructions -->
+        <section class="block">
+          <div class="block-head">
+            <h2>Task Instructions</h2>
+          </div>
+          <div class="card instructions-card">
+            <textarea
+              id="task-prompt"
+              class="prompt-area"
+              readonly
+              spellcheck="false"
+              placeholder="Select a task to view full instructions…"
+            ></textarea>
+            <div class="prompt-foot">
+              <span id="prompt-chars">0 characters</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. Available Workspace -->
+        <section class="block">
+          <div class="block-head">
+            <h2>Available Workspace</h2>
+            <span class="hint" id="file-count">0 files</span>
+          </div>
+          <p class="obs-note">Observation only — the agent chooses which files to access.</p>
+          <ul class="file-list" id="file-list">
+            <li class="empty">Workspace mounts when a run starts</li>
+          </ul>
+        </section>
+
+        <!-- 4. Agent / Model -->
+        <section class="block">
+          <div class="block-head"><h2>Agent / Model</h2></div>
+          <div class="card">
+            <div class="field-row">
+              <label class="field tight">
+                <span>Provider</span>
+                <select id="sel-provider"></select>
+              </label>
+              <label class="field tight">
+                <span>Model</span>
+                <select id="sel-model"></select>
+              </label>
+            </div>
+            <p class="provider-hint" id="provider-hint"></p>
+            <dl class="kv compact" id="agent-kv">
+              <div><dt>Provider</dt><dd id="kv-provider">—</dd></div>
+              <div><dt>Model</dt><dd id="kv-model">—</dd></div>
+              <div><dt>Status</dt><dd id="kv-status">Idle</dd></div>
+              <div><dt>Run ID</dt><dd id="kv-run" class="mono">—</dd></div>
+            </dl>
+          </div>
+        </section>
+
+        <!-- 5. Run History -->
+        <section class="block history-block">
+          <div class="block-head">
+            <h2>Run History</h2>
+            <button type="button" class="linkish" id="btn-clear-history" title="Clear history">Clear</button>
+          </div>
+          <ul class="history-list" id="history-list">
+            <li class="empty">No runs yet</li>
+          </ul>
+        </section>
       </div>
-      <button id="again" type="button">Another</button>
-    </header>
-    <div id="sess-prompt" class="prompt"></div>
-    <div id="log" class="log"></div>
-    <div id="done" class="done hidden">
-      <div class="done-head">
-        <h2>Answer</h2>
-        <span id="score"></span>
+    </aside>
+
+    <!-- CENTER: Agent Activity -->
+    <main class="panel center" id="panel-center">
+      <header class="center-top">
+        <div>
+          <h1 id="center-title">Agent Activity</h1>
+          <p class="center-sub" id="center-sub">Observable actions only — the agent works autonomously</p>
+        </div>
+        <div class="live-chip" id="live-chip" data-state="idle">
+          <span class="dot"></span>
+          <span id="live-label">Idle</span>
+          <span class="sep">·</span>
+          <span id="live-timer">0.0s</span>
+        </div>
+      </header>
+
+      <div class="center-body">
+        <!-- Idle -->
+        <div id="setup" class="setup">
+          <div class="setup-card idle-card">
+            <h2>Ready to run</h2>
+            <p>
+              Choose a task and review the instructions in the left panel, then click
+              <strong>Start Run</strong>. The agent will inspect the workspace, select
+              files, and use tools on its own. You supervise from the right panel.
+            </p>
+          </div>
+        </div>
+
+        <!-- Timeline -->
+        <div id="timeline-wrap" class="timeline-wrap hidden">
+          <div id="timeline" class="timeline" role="log" aria-live="polite"></div>
+        </div>
+
+        <!-- Final result -->
+        <div id="result" class="result hidden">
+          <div class="result-card">
+            <div class="result-head">
+              <h2>Task Completed</h2>
+              <button type="button" class="linkish" id="btn-show-timeline">View activity</button>
+            </div>
+            <h3>Final Answer</h3>
+            <pre id="answer"></pre>
+            <div class="eval">
+              <div class="eval-head">
+                <h3>Evaluation</h3>
+                <span id="score" class="score"></span>
+              </div>
+              <div id="rubric" class="rubric"></div>
+              <button type="button" class="btn ghost sm" id="btn-full-eval">View Full Evaluation</button>
+            </div>
+          </div>
+        </div>
       </div>
-      <pre id="answer"></pre>
-      <div id="rubric"></div>
+    </main>
+
+    <!-- RIGHT: Human Supervisor -->
+    <aside class="panel right" id="panel-right">
+      <div class="right-inner">
+        <section class="block">
+          <div class="block-head"><h2>Human Supervisor</h2></div>
+          <div class="status-panel" id="status-panel" data-state="idle">
+            <div class="status-label" id="status-label">Idle</div>
+            <p class="status-help" id="status-help">Start a run to supervise the agent.</p>
+          </div>
+        </section>
+
+        <section class="block waiting-block hidden" id="waiting-block">
+          <div class="waiting-banner">
+            <div class="waiting-title">⚠ Human input requested</div>
+            <p>The agent is waiting for your guidance.</p>
+            <p class="waiting-reason" id="waiting-reason"></p>
+            <div class="waiting-actions">
+              <button type="button" class="btn primary sm" id="btn-continue">Continue</button>
+              <button type="button" class="btn ghost sm" id="btn-focus-guidance">Provide Guidance</button>
+              <button type="button" class="btn danger sm" id="btn-interrupt-wait">Interrupt</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="block">
+          <div class="block-head"><h2>Controls</h2></div>
+          <div class="controls">
+            <button type="button" class="btn control" id="btn-pause" disabled>Pause Agent</button>
+            <button type="button" class="btn control" id="btn-resume" disabled>Resume Agent</button>
+            <button type="button" class="btn control danger" id="btn-interrupt" disabled>Interrupt Agent</button>
+          </div>
+        </section>
+
+        <section class="block sticky-guidance">
+          <div class="block-head"><h2>Human Guidance</h2></div>
+          <p class="obs-note">Guidance is injected into the agent’s next step.</p>
+          <textarea
+            id="say"
+            rows="4"
+            placeholder="Tell the agent to reconsider its approach…"
+            disabled
+          ></textarea>
+          <button type="button" class="btn primary full" id="btn-send" disabled>Send Guidance</button>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Full evaluation drawer -->
+  <div id="eval-drawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-backdrop" id="eval-backdrop"></div>
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <h2>Full Evaluation</h2>
+        <button type="button" class="linkish" id="btn-close-eval">Close</button>
+      </div>
+      <div id="eval-full" class="eval-full"></div>
     </div>
   </div>
-  <div id="composer" class="composer hidden">
-    <div class="composer-inner">
-      <textarea id="say" rows="1" placeholder="Interrupt the agent — correct it, redirect it, add context…"></textarea>
-      <button id="pause" type="button" class="ghost">Pause</button>
-      <button id="send" type="button">Send</button>
-    </div>
-  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>
