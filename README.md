@@ -6,10 +6,13 @@ Local Archipelago-style loop: tools + model + live UI.
 cd apex-harness
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python3 server.py
+./setup-domain.sh   # maps apex-accounting-harness.ai → 127.0.0.1 (needs sudo)
+./run.sh
 ```
 
-Open http://127.0.0.1:8765
+Open http://apex-accounting-harness.ai:8765
+
+While a run is live, use the bottom bar: **Pause** holds the agent between steps; **Send** injects a correction into the next LLM turn (groq/gemini). Tool calls render as highlighted cards (args + output).
 
 - **local** — Task 30 only. Real tools against the workpapers. No key.
 - **groq** — paste a free key from https://console.groq.com/keys

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import io
 import subprocess
 import sys
@@ -41,7 +42,7 @@ TOOL_SCHEMA = [
         "type": "function",
         "function": {
             "name": "inspect_xlsx",
-            "description": "Sheet names, headers, dtypes, and first rows of a workbook.",
+            "description": "Sheet names and first rows of an xlsx workbook, or header + sample rows of a csv.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -56,7 +57,7 @@ TOOL_SCHEMA = [
         "type": "function",
         "function": {
             "name": "read_xlsx",
-            "description": "Read a sheet as a text table.",
+            "description": "Read an xlsx sheet or csv file as a text table (csv: sheet param ignored).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -173,10 +174,25 @@ class Toolbelt:
             header += f"# truncated, {more} chars remain — raise offset\n"
         return header + chunk
 
+    def _csv_rows(self, target: Path) -> list[list[str]]:
+        with target.open(newline="", encoding="utf-8-sig", errors="replace") as f:
+            return list(csv.reader(f))
+
     def inspect_xlsx(self, path: str, max_rows: int = 12) -> str:
+        target = self.resolve(path)
+        if target.suffix.lower() == ".csv":
+            self.touch(target, "inspect")
+            rows = self._csv_rows(target)
+            out = [f"# {target.name}  format=csv  rows={len(rows)}"]
+            out.append(f"\n=== (csv)  rows={len(rows)} cols={max((len(r) for r in rows), default=0)} ===")
+            for i, row in enumerate(rows[:max_rows], 1):
+                out.append(f"{i:>3} | " + " | ".join(row))
+            if len(rows) > max_rows:
+                out.append(f"# {len(rows) - max_rows} rows remain")
+            return "\n".join(out)
+
         import openpyxl
 
-        target = self.resolve(path)
         wb = openpyxl.load_workbook(target, data_only=True)
         self.touch(target, "inspect")
         out = [f"# {target.name}  sheets={wb.sheetnames}"]
@@ -188,9 +204,20 @@ class Toolbelt:
         return "\n".join(out)
 
     def read_xlsx(self, path: str, sheet: str | None = None, skip: int = 0, max_rows: int = 40) -> str:
+        target = self.resolve(path)
+        if target.suffix.lower() == ".csv":
+            rows = self._csv_rows(target)
+            self.touch(target, "read")
+            chunk = rows[skip : skip + max_rows]
+            out = [f"# {target.name} / (csv)  total_rows={len(rows)} skip={skip}"]
+            for i, row in enumerate(chunk, skip + 1):
+                out.append(f"{i:>3} | " + " | ".join(row))
+            if skip + max_rows < len(rows):
+                out.append(f"# {len(rows) - skip - max_rows} rows remain")
+            return "\n".join(out)
+
         import openpyxl
 
-        target = self.resolve(path)
         wb = openpyxl.load_workbook(target, data_only=True)
         name = sheet or wb.sheetnames[0]
         if name not in wb.sheetnames:

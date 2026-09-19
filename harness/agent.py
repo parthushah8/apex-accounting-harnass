@@ -31,8 +31,50 @@ Emit = Callable[[dict], Any]
 
 
 class LoopHarness:
-    def __init__(self, emit: Emit):
+    def __init__(
+        self,
+        emit: Emit,
+        inbox: asyncio.Queue | None = None,
+        gate: asyncio.Event | None = None,
+    ):
         self.emit = emit
+        self.inbox = inbox
+        self.gate = gate
+
+    async def _checkpoint(self, messages: list[dict] | None, step: int) -> None:
+        """Between steps: block while paused, then inject any queued human corrections."""
+        if self.gate is not None and not self.gate.is_set():
+            await self.gate.wait()
+        if self.inbox is None:
+            return
+        while True:
+            try:
+                text = self.inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await self.emit({"type": "user_message_injected", "step": step, "text": text})
+            if messages is not None:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[human operator interrupt] The human supervising this run says:\n"
+                            f"{text}\n"
+                            "This overrides your current approach. Acknowledge and adjust."
+                        ),
+                    }
+                )
+            else:
+                await self.emit(
+                    {
+                        "type": "llm_text",
+                        "step": step,
+                        "text": (
+                            "[local scripted run — human note recorded but cannot reroute this solver. "
+                            f"Use groq/gemini to steer the agent.] {text}"
+                        ),
+                    }
+                )
 
     async def run(
         self,
@@ -140,6 +182,7 @@ class LoopHarness:
         self._tokens = 0
 
         for step in range(1, max_steps + 1):
+            await self._checkpoint(messages, step)
             remaining = max_steps - step
             tok_left = max(0, max_tokens - self._tokens)
             if remaining == 0 or tok_left < 800:
@@ -365,6 +408,7 @@ for b in order:
 
         py_out = ""
         for step, thought, name, args in plan:
+            await self._checkpoint(None, step)
             await self.emit(
                 {
                     "type": "step_started",

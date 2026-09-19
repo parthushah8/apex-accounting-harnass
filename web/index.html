@@ -3,28 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>APEX</title>
+  <title>apex-accounting-harness.ai</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div id="pick" class="screen">
-    <header>
-      <h1>APEX</h1>
-      <p>World 9 · Sterling, Marsh &amp; Associates · pick a task</p>
-    </header>
-    <div id="tasks" class="tasks"></div>
-    <footer class="bar">
-      <button id="run" type="button" disabled>Run</button>
-    </footer>
-  </div>
-
-  <div id="session" class="screen hidden">
+  <div id="session" class="screen">
     <header class="sess-top">
-      <button id="back" type="button">← Tasks</button>
       <div class="sess-meta">
+        <h1>apex-accounting-harness.ai</h1>
         <strong id="sess-name"></strong>
-        <span id="sess-live">starting</span>
+        <span id="sess-live">drawing a task</span>
       </div>
+      <button id="again" type="button">Another</button>
     </header>
     <div id="sess-prompt" class="prompt"></div>
     <div id="log" class="log"></div>
@@ -35,10 +25,15 @@
       </div>
       <pre id="answer"></pre>
       <div id="rubric"></div>
-      <button id="again" type="button">New task</button>
     </div>
   </div>
-
+  <div id="composer" class="composer hidden">
+    <div class="composer-inner">
+      <textarea id="say" rows="1" placeholder="Interrupt the agent — correct it, redirect it, add context…"></textarea>
+      <button id="pause" type="button" class="ghost">Pause</button>
+      <button id="send" type="button">Send</button>
+    </div>
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>

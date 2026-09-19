@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from harness.agent import LoopHarness
-from harness.config import DEFAULT_MODELS, MAX_STEPS, MAX_TOKENS, PORT, provider_status
+from harness.config import DEFAULT_MODELS, HOST, MAX_STEPS, MAX_TOKENS, PORT, provider_status
 from harness.tasks import load_tasks, public_task
 
 WEB = Path(__file__).resolve().parent / "web"
@@ -26,6 +26,10 @@ class StartRun(BaseModel):
     api_key: str | None = None
     max_steps: int = MAX_STEPS
     max_tokens: int = MAX_TOKENS
+
+
+class UserMessage(BaseModel):
+    text: str
 
 
 @app.get("/favicon.ico")
@@ -66,12 +70,16 @@ async def start_run(body: StartRun):
     run_counter += 1
     run_id = f"r{run_counter:04d}"
     queue: asyncio.Queue = asyncio.Queue()
+    gate = asyncio.Event()
+    gate.set()
     state = {
         "id": run_id,
         "status": "running",
         "queue": queue,
         "history": [],
         "task_id": body.task_id,
+        "inbox": asyncio.Queue(),
+        "gate": gate,
     }
     runs[run_id] = state
 
@@ -83,7 +91,7 @@ async def start_run(body: StartRun):
     async def runner():
         try:
             await emit({"type": "log", "level": "info", "message": f"loop start · {body.provider}"})
-            harness = LoopHarness(emit)
+            harness = LoopHarness(emit, inbox=state["inbox"], gate=state["gate"])
             await harness.run(
                 task_id=body.task_id,
                 provider=body.provider,
@@ -101,6 +109,52 @@ async def start_run(body: StartRun):
 
     asyncio.create_task(runner())
     return {"run_id": run_id}
+
+
+async def _push(run: dict, event: dict) -> None:
+    run["history"].append({"run_id": run["id"], **event})
+    await run["queue"].put("tick")
+
+
+def _live_run(run_id: str) -> dict:
+    run = runs.get(run_id)
+    if not run:
+        raise HTTPException(404, "unknown run")
+    if run["status"] != "running":
+        raise HTTPException(409, "run already finished")
+    return run
+
+
+@app.post("/api/runs/{run_id}/message")
+async def message_run(run_id: str, body: UserMessage):
+    run = _live_run(run_id)
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "empty message")
+    await _push(run, {"type": "user_message", "text": text})
+    await run["inbox"].put(text)
+    if not run["gate"].is_set():
+        run["gate"].set()
+        await _push(run, {"type": "resumed", "reason": "user message"})
+    return {"ok": True}
+
+
+@app.post("/api/runs/{run_id}/pause")
+async def pause_run(run_id: str):
+    run = _live_run(run_id)
+    if run["gate"].is_set():
+        run["gate"].clear()
+        await _push(run, {"type": "paused"})
+    return {"ok": True}
+
+
+@app.post("/api/runs/{run_id}/resume")
+async def resume_run(run_id: str):
+    run = _live_run(run_id)
+    if not run["gate"].is_set():
+        run["gate"].set()
+        await _push(run, {"type": "resumed"})
+    return {"ok": True}
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -140,4 +194,5 @@ app.mount("/", StaticFiles(directory=WEB, html=True), name="web")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("server:app", host="127.0.0.1", port=PORT, reload=True)
+    print(f"http://{HOST}:{PORT}")
+    uvicorn.run("server:app", host="127.0.0.1", port=PORT, reload=False)

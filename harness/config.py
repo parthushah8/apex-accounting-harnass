@@ -31,6 +31,7 @@ DEFAULT_MODELS = {
 MODEL = env("APEX_MODEL") or DEFAULT_MODELS.get(PROVIDER, "openai/gpt-oss-120b")
 MAX_STEPS = int(env("APEX_MAX_STEPS", "40"))
 MAX_TOKENS = int(env("APEX_MAX_TOKENS", "200000"))
+HOST = env("APEX_HOST", "apex-accounting-harness.ai")
 PORT = int(env("APEX_PORT", "8765"))
 
 
