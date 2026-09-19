@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>APEX</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="pick" class="screen">
+    <header>
+      <h1>APEX</h1>
+      <p>World 9 · Sterling, Marsh &amp; Associates · pick a task</p>
+    </header>
+    <div id="tasks" class="tasks"></div>
+    <footer class="bar">
+      <button id="run" type="button" disabled>Run</button>
+    </footer>
+  </div>
+
+  <div id="session" class="screen hidden">
+    <header class="sess-top">
+      <button id="back" type="button">← Tasks</button>
+      <div class="sess-meta">
+        <strong id="sess-name"></strong>
+        <span id="sess-live">starting</span>
+      </div>
+    </header>
+    <div id="sess-prompt" class="prompt"></div>
+    <div id="log" class="log"></div>
+    <div id="done" class="done hidden">
+      <div class="done-head">
+        <h2>Answer</h2>
+        <span id="score"></span>
+      </div>
+      <pre id="answer"></pre>
+      <div id="rubric"></div>
+      <button id="again" type="button">New task</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
