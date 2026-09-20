@@ -44,6 +44,20 @@ def grade_answer(answer: str, rubric: list[dict]) -> dict:
                     met = True
                     matched = n
                     break
+        elif re.search(r"\bno more than one journal entr(?:y|ies)\b", desc, re.I):
+            # Count proposed entry blocks, not every mention of "journal entry".
+            # A single JE legitimately contains multiple debit/credit lines.
+            entry_blocks = re.findall(
+                r"(?im)^\s*(?:\d+\.\s+to\s+record\b|proposed\s+(?:journal entry|je)\b|"
+                r"(?:journal entry|je)\s*#?\s*\d+\b)",
+                answer,
+            )
+            explicit_plural = bool(
+                re.search(r"(?i)\b(?:propose|record)(?:s|d|ing)?\s+(?:the\s+)?following\s+"
+                          r"(?:two|three|multiple)\s+journal entries\b", answer)
+            )
+            met = not explicit_plural and len(entry_blocks) <= 1
+            matched = f"{len(entry_blocks)} proposed entry block(s)"
         else:
             # qualitative: look for distinctive quoted phrases / names of 6+ chars
             tokens = re.findall(r"[A-Z][A-Za-z0-9&.'/-]{4,}(?:\s+[A-Z][A-Za-z0-9&.'/-]+)*", desc)

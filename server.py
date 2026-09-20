@@ -84,7 +84,8 @@ async def start_run(body: StartRun):
     runs[run_id] = state
 
     async def emit(event: dict):
-        event = {"run_id": run_id, **event}
+        # seq lets the client drop duplicates when an SSE reconnect replays history
+        event = {"run_id": run_id, "seq": len(state["history"]), **event}
         state["history"].append(event)
         await queue.put("tick")
 
@@ -112,7 +113,7 @@ async def start_run(body: StartRun):
 
 
 async def _push(run: dict, event: dict) -> None:
-    run["history"].append({"run_id": run["id"], **event})
+    run["history"].append({"run_id": run["id"], "seq": len(run["history"]), **event})
     await run["queue"].put("tick")
 
 
@@ -133,10 +134,8 @@ async def message_run(run_id: str, body: UserMessage):
         raise HTTPException(422, "empty message")
     await _push(run, {"type": "user_message", "text": text})
     await run["inbox"].put(text)
-    if not run["gate"].is_set():
-        run["gate"].set()
-        await _push(run, {"type": "resumed", "reason": "user message"})
-    return {"ok": True}
+    await _push(run, {"type": "guidance_queued"})
+    return {"ok": True, "paused": not run["gate"].is_set()}
 
 
 @app.post("/api/runs/{run_id}/pause")

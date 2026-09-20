@@ -211,22 +211,39 @@ class LoopHarness:
                 }
             )
 
-            try:
-                resp = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=TOOL_SCHEMA,
-                    temperature=0.1,
-                    extra_body={"reasoning_effort": "medium"} if provider == "groq" else {},
-                )
-            except Exception:
-                # groq extra_body can fail on some models
-                resp = await client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=TOOL_SCHEMA,
-                    temperature=0.1,
-                )
+            for _attempt in range(3):
+                try:
+                    resp = await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        tools=TOOL_SCHEMA,
+                        temperature=0.1,
+                        extra_body={"reasoning_effort": "medium"} if provider == "groq" else {},
+                    )
+                    break
+                except Exception as api_err:
+                    err_str = str(api_err)
+                    if "extra_body" in err_str or "extra_" in err_str:
+                        # groq extra_body can fail on some models — retry without it
+                        try:
+                            resp = await client.chat.completions.create(
+                                model=model, messages=messages, tools=TOOL_SCHEMA, temperature=0.1,
+                            )
+                            break
+                        except Exception:
+                            pass
+                    if "tool_use_failed" in err_str or "Failed to parse tool call" in err_str:
+                        # model generated malformed tool args — nudge and retry
+                        await self.emit({"type": "error", "message": f"model produced malformed tool args (retrying): {err_str[:200]}"})
+                        messages.append({
+                            "role": "user",
+                            "content": "[harness] Your last tool call had malformed JSON arguments. Wrap code in {\"code\": \"...\"} for run_python. Try again.",
+                        })
+                        continue
+                    raise
+            else:
+                await self.emit({"type": "error", "message": "model failed to produce valid tool calls after 3 attempts"})
+                continue
 
             usage = resp.usage
             if usage:
@@ -285,8 +302,36 @@ class LoopHarness:
                 except json.JSONDecodeError:
                     args = {}
                 call_id = tc.id or uuid.uuid4().hex
+                # Pause is cooperative: let the current API request finish, but
+                # never start the next tool action until the supervisor resumes.
+                if self.gate is not None and not self.gate.is_set():
+                    await self.gate.wait()
                 await self.emit({"type": "tool_call", "step": step, "call_id": call_id, "name": name, "args": args})
                 t1 = time.time()
+                guidance_pending = self.inbox is not None and not self.inbox.empty()
+                if guidance_pending:
+                    result = (
+                        f"{name} deferred: human guidance is pending. "
+                        "The supervisor's instruction will be injected before the next turn. "
+                        "Re-plan after reading it, then decide which tool to call."
+                    )
+                    answer = None
+                    ok = False
+                    ms = int((time.time() - t1) * 1000)
+                    await self.emit(
+                        {
+                            "type": "tool_result",
+                            "step": step,
+                            "call_id": call_id,
+                            "name": name,
+                            "ok": ok,
+                            "ms": ms,
+                            "chars": len(result),
+                            "preview": result,
+                        }
+                    )
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+                    continue
                 try:
                     result, answer = tools.dispatch(name, args)
                     ok = True

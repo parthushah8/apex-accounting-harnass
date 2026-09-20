@@ -2,6 +2,8 @@
 
 Local Archipelago-style loop: tools + model + live UI.
 
+AI loop harness (step loop, tools, pause/inject, events): **[ARCHITECTURE.md](./ARCHITECTURE.md)**.
+
 ```bash
 cd apex-harness
 python3 -m venv .venv && source .venv/bin/activate

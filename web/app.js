@@ -1,56 +1,52 @@
 const $ = (id) => document.getElementById(id);
 
-const HISTORY_KEY = "apex_workbench_history_v1";
-const PROVIDER_LABELS = {
-  groq: "Groq",
-  gemini: "Google Gemini",
-  openai: "OpenAI",
-  local: "Local (scripted)",
-};
-
-const FILE_STATUS_LABEL = {
-  available: "Available",
-  reading: "Reading",
-  in_use: "In use",
-  completed: "Completed",
-  not_accessed: "Not accessed",
-};
-
-const TOOL_LABELS = {
-  list_dir: "List directory",
-  read_file: "Read file",
-  inspect_xlsx: "Inspect spreadsheet",
-  read_xlsx: "Read spreadsheet",
-  read_pdf: "Read PDF",
-  run_python: "Python analysis",
-  submit_answer: "Submit answer",
-};
+const HISTORY_KEY = "apex_workbench_history_v2";
+const PROVIDER_LABELS = { groq: "Groq", gemini: "Google Gemini", openai: "OpenAI", local: "Local (scripted)" };
+const FILE_STATUS_LABEL = { available: "Available", reading: "Reading", in_use: "In use", completed: "Completed", not_accessed: "Not accessed" };
+const TOOL_LABELS = { list_dir: "list_dir", read_file: "read_file", inspect_xlsx: "inspect_xlsx", read_xlsx: "read_xlsx", read_pdf: "read_pdf", run_python: "run_python", submit_answer: "submit_answer" };
 
 const state = {
   tasks: [],
   status: null,
-  lastId: null,
+  runId: null,
   source: null,
   timer: null,
   t0: 0,
-  runId: null,
   live: false,
   paused: false,
   interrupted: false,
   waiting: false,
-  agentStatus: "idle",
+  guidancePending: false,
+  runComplete: false,
+  lastSeq: -1,
   currentTask: null,
   provider: null,
   model: null,
-  files: new Map(), // path -> { path, status, dir }
-  cards: new Map(), // call_id -> { el, argsEl, outEl, statEl }
+  // step tracking
+  currentStep: 0,
+  stepsMax: 40,
+  tokensUsed: 0,
+  tokensMax: 200000,
+  stepCards: new Map(),
+  focusedStep: 0,
+  // files
+  files: new Map(),
+  // tools
+  toolData: new Map(),
+  // review
+  flags: new Map(),
+  // grade
   lastGrade: null,
   lastAnswer: null,
+  // auto-follow
+  autoFollow: true,
+  // history
   history: loadHistory(),
-  llmPhase: 0,
+  // dropdown state
+  openDropdown: null,
 };
 
-// ---------- boot ----------
+// ===================== BOOT =====================
 
 async function boot() {
   const [tasks, status] = await Promise.all([
@@ -64,20 +60,17 @@ async function boot() {
   updateModelSelect();
   syncTaskPanel();
   renderHistory();
-  setAgentStatus("idle");
-  showSetup(true);
   $("sel-task").addEventListener("change", syncTaskPanel);
+  bindSetupEvents();
+  bindRunEvents();
+  bindKeyboard();
 }
 
+// ===================== SETUP =====================
+
 function fillTaskSelect() {
-  const sel = $("sel-task");
-  sel.innerHTML = state.tasks
-    .map(
-      (t) =>
-        `<option value="${escAttr(t.task_id)}">${esc(t.task_name)}${
-          t.category ? ` · ${esc(t.category)}` : ""
-        }</option>`
-    )
+  $("sel-task").innerHTML = state.tasks
+    .map((t) => `<option value="${escAttr(t.task_id)}">${esc(t.task_name)}${t.category ? ` · ${esc(t.category)}` : ""}</option>`)
     .join("");
 }
 
@@ -86,57 +79,35 @@ function syncTaskPanel() {
   if (!task) {
     $("task-id").textContent = "—";
     $("task-category").textContent = "—";
+    $("instructions-preview").textContent = "";
     $("task-prompt").value = "";
     $("prompt-chars").textContent = "0 characters";
     return;
   }
   $("task-id").textContent = task.task_id;
   $("task-category").textContent = task.category || "—";
-  $("task-prompt").value = task.prompt || "";
-  const n = (task.prompt || "").length;
-  $("prompt-chars").textContent = `${n} character${n === 1 ? "" : "s"}`;
+  const prompt = task.prompt || "";
+  $("instructions-preview").textContent = clip(prompt, 200);
+  $("task-prompt").value = prompt;
+  $("prompt-chars").textContent = `${prompt.length} character${prompt.length === 1 ? "" : "s"}`;
 }
 
 function fillProviderSelect() {
   const sel = $("sel-provider");
   const providers = state.status?.providers || {};
-  const defaults = state.status?.defaults || {};
-  const keys = Object.keys(providers);
-  // Prefer configured providers first
   const ordered = ["groq", "openai", "gemini", "local"].filter((k) => k in providers);
-  keys.forEach((k) => {
-    if (!ordered.includes(k)) ordered.push(k);
-  });
+  Object.keys(providers).forEach((k) => { if (!ordered.includes(k)) ordered.push(k); });
   sel.innerHTML = ordered
     .map((k) => {
-      const ok = providers[k];
       const label = PROVIDER_LABELS[k] || k;
-      const mark = ok ? "" : " (no key)";
-      return `<option value="${escAttr(k)}" ${ok ? "" : ""}>${esc(label)}${mark}</option>`;
+      const mark = providers[k] ? "" : " (no key)";
+      return `<option value="${escAttr(k)}">${esc(label)}${mark}</option>`;
     })
     .join("");
-
-  // Prefer first available with key, else local
-  const preferred =
-    ordered.find((k) => providers[k] && k !== "local") ||
-    (providers.local ? "local" : ordered[0]);
+  const preferred = ordered.find((k) => providers[k] && k !== "local") || (providers.local ? "local" : ordered[0]);
   if (preferred) sel.value = preferred;
-
-  sel.onchange = () => {
-    updateModelSelect();
-    updateProviderHint();
-    syncAgentKvPreview();
-  };
+  sel.onchange = () => { updateModelSelect(); updateProviderHint(); };
   updateProviderHint();
-  $("sel-model").onchange = syncAgentKvPreview;
-}
-
-function syncAgentKvPreview() {
-  if (state.live) return;
-  const provider = $("sel-provider").value;
-  const model = $("sel-model").value;
-  $("kv-provider").textContent = PROVIDER_LABELS[provider] || provider || "—";
-  $("kv-model").textContent = model || "—";
 }
 
 function updateModelSelect() {
@@ -144,266 +115,256 @@ function updateModelSelect() {
   const defaults = state.status?.defaults || {};
   const model = defaults[provider] || "";
   const sel = $("sel-model");
-  // Use backend defaults; allow free-form via single option + custom if needed
   const options = new Set();
   if (model) options.add(model);
-  // Sensible extras per provider without hard-coding as sole source of truth
-  if (provider === "openai") {
-    ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"].forEach((m) => options.add(m));
-  } else if (provider === "gemini") {
-    ["gemini-2.5-flash", "gemini-2.0-flash"].forEach((m) => options.add(m));
-  } else if (provider === "groq") {
-    ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"].forEach((m) => options.add(m));
-  } else if (provider === "local") {
-    options.add("local-loop");
-  }
-  sel.innerHTML = [...options]
-    .map((m) => `<option value="${escAttr(m)}">${esc(m)}</option>`)
-    .join("");
+  if (provider === "openai") ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"].forEach((m) => options.add(m));
+  else if (provider === "gemini") ["gemini-2.5-flash", "gemini-2.0-flash"].forEach((m) => options.add(m));
+  else if (provider === "groq") ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"].forEach((m) => options.add(m));
+  else if (provider === "local") options.add("local-loop");
+  sel.innerHTML = [...options].map((m) => `<option value="${escAttr(m)}">${esc(m)}</option>`).join("");
   if (model) sel.value = model;
-  syncAgentKvPreview();
 }
 
 function updateProviderHint() {
   const provider = $("sel-provider").value;
   const ok = state.status?.providers?.[provider];
   const el = $("provider-hint");
-  if (provider === "local") {
-    el.textContent = "Local runs a scripted solver for Task 30 only — no API key required.";
-  } else if (!ok) {
-    el.textContent = `No API key detected for ${PROVIDER_LABELS[provider] || provider}. Set it in .env or the run may fail.`;
-  } else {
-    el.textContent = `Using ${PROVIDER_LABELS[provider] || provider} · model from server defaults unless changed.`;
-  }
+  if (provider === "local") el.textContent = "Local runs a scripted solver for Task 30 only — no API key required.";
+  else if (!ok) el.textContent = `No API key detected for ${PROVIDER_LABELS[provider] || provider}. Set it in .env or the run may fail.`;
+  else el.textContent = `Using ${PROVIDER_LABELS[provider] || provider} · model from server defaults unless changed.`;
 }
 
-// ---------- start / pick ----------
-
+function taskById(id) { return state.tasks.find((t) => t.task_id === id || t.slug === id); }
 function pickRandom() {
-  const pool = state.tasks.filter((t) => t.task_id !== state.lastId);
-  const list = pool.length ? pool : state.tasks;
-  return list[Math.floor(Math.random() * list.length)];
+  const pool = state.tasks.filter((t) => t.task_id !== (state.currentTask?.task_id));
+  return (pool.length ? pool : state.tasks)[Math.floor(Math.random() * state.tasks.length)];
 }
 
-function taskById(id) {
-  return state.tasks.find((t) => t.task_id === id || t.slug === id);
+function bindSetupEvents() {
+  $("btn-start").addEventListener("click", () => {
+    const task = taskById($("sel-task").value);
+    if (task) startRun(task);
+  });
+  $("btn-random").addEventListener("click", () => {
+    const task = pickRandom();
+    if (!task) return;
+    $("sel-task").value = task.task_id;
+    syncTaskPanel();
+    startRun(task);
+  });
+  $("btn-toggle-prompt").addEventListener("click", () => {
+    const full = $("instructions-full");
+    const btn = $("btn-toggle-prompt");
+    full.classList.toggle("hidden");
+    btn.textContent = full.classList.contains("hidden") ? "Show full instructions" : "Hide full instructions";
+  });
+  $("btn-history").addEventListener("click", openHistory);
 }
 
-$("btn-start").addEventListener("click", () => {
-  const task = taskById($("sel-task").value);
-  if (!task) return;
-  start(task);
-});
+// ===================== VIEW SWITCHING =====================
 
-$("btn-random").addEventListener("click", () => {
-  const task = pickRandom();
-  if (!task) return;
-  $("sel-task").value = task.task_id;
-  syncTaskPanel();
-  start(task);
-});
+function showSetupView() {
+  $("setup-view").classList.remove("hidden");
+  $("run-view").classList.add("hidden");
+}
 
-$("btn-new-run").addEventListener("click", () => {
+function showRunView() {
+  $("setup-view").classList.add("hidden");
+  $("run-view").classList.remove("hidden");
+}
+
+// ===================== START RUN =====================
+
+async function startRun(task) {
   softStop();
-  showSetup(true);
-  setAgentStatus("idle");
-  clearWorkspace();
-  syncTaskPanel();
-  $("kv-model").textContent = $("sel-model").value || "—";
-  $("kv-provider").textContent =
-    PROVIDER_LABELS[$("sel-provider").value] || $("sel-provider").value || "—";
-  $("kv-run").textContent = "—";
-  $("center-title").textContent = "Agent Activity";
-  $("center-sub").textContent = "Observable actions only — the agent works autonomously";
-  setRunControlsEnabled(true);
-});
-
-function setRunControlsEnabled(on) {
-  $("btn-start").disabled = !on;
-  $("btn-random").disabled = !on;
-  $("sel-task").disabled = !on;
-  $("sel-provider").disabled = !on;
-  $("sel-model").disabled = !on;
-}
-
-async function start(task) {
-  softStop();
-  state.lastId = task.task_id;
   state.currentTask = task;
-  state.cards.clear();
-  state.files.clear();
+  state.provider = $("sel-provider").value;
+  state.model = $("sel-model").value;
+  state.runId = null;
   state.paused = false;
   state.interrupted = false;
   state.waiting = false;
+  state.guidancePending = false;
+  state.runComplete = false;
+  state.lastSeq = -1;
   state.lastGrade = null;
   state.lastAnswer = null;
-  state.llmPhase = 0;
-  state.provider = $("sel-provider").value;
-  state.model = $("sel-model").value;
+  state.currentStep = 0;
+  state.stepsMax = 40;
+  state.tokensUsed = 0;
+  state.tokensMax = 200000;
+  state.stepCards.clear();
+  state.toolData.clear();
+  state.files.clear();
+  state.flags.clear();
+  state.autoFollow = true;
+  state.focusedStep = 0;
 
-  syncTaskPanel();
-  $("kv-model").textContent = state.model;
-  $("kv-provider").textContent = PROVIDER_LABELS[state.provider] || state.provider;
-  $("kv-run").textContent = "…";
-  $("file-list").innerHTML = `<li class="empty">Mounting workspace…</li>`;
+  // Setup run view
+  showRunView();
+  $("topbar-task").textContent = task.task_name;
+  $("topbar-model").textContent = state.model;
+  $("topbar-files").textContent = "Files (0)";
+  $("topbar-timer").textContent = "0.0s";
+  $("topbar-steps").textContent = "Step 0/40";
+  $("topbar-tokens").textContent = "0 tok";
+  $("step-rail").innerHTML = "";
+  $("file-list").innerHTML = '<li class="empty">Mounting…</li>';
   $("file-count").textContent = "…";
-  $("timeline").innerHTML = "";
-  $("answer").textContent = "";
-  $("rubric").innerHTML = "";
-  $("score").textContent = "";
-  $("score").className = "score";
-  $("waiting-block").classList.add("hidden");
-
-  showSetup(false);
-  showResult(false);
-  $("timeline-wrap").classList.remove("hidden");
-  $("center-title").textContent = "Agent Activity";
-  $("center-sub").textContent = task.task_name;
-  setRunControlsEnabled(false);
+  $("flagged-list").innerHTML = '<li class="empty">No flags yet</li>';
+  $("flag-count").classList.add("hidden");
+  $("composer-context").classList.add("hidden");
+  $("say").value = "";
+  $("say").disabled = false;
+  $("btn-send").disabled = false;
+  $("waiting-banner").classList.add("hidden");
+  $("jump-live").classList.add("hidden");
+  $("prompt-dd-text").textContent = task.prompt || "";
+  setLiveState("running");
+  updateControls();
 
   state.t0 = Date.now();
   if (state.timer) clearInterval(state.timer);
   state.timer = setInterval(() => {
-    $("live-timer").textContent = `${((Date.now() - state.t0) / 1000).toFixed(1)}s`;
+    $("topbar-timer").textContent = `${((Date.now() - state.t0) / 1000).toFixed(1)}s`;
   }, 200);
 
-  setAgentStatus("running");
-  setComposer(true);
-
-  addEvent({
-    kind: "start",
-    icon: "●",
-    type: "Task started",
-    desc: `Agent started APEX task “${task.task_name}”`,
-    status: "running",
-  });
+  addSysCard("●", `Run started · ${PROVIDER_LABELS[state.provider] || state.provider} · ${state.model}`);
 
   const res = await fetch("/api/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      task_id: task.task_id,
-      provider: state.provider,
-      model: state.model,
-      max_steps: 40,
-    }),
+    body: JSON.stringify({ task_id: task.task_id, provider: state.provider, model: state.model, max_steps: 40 }),
   });
   const { run_id } = await res.json();
   state.runId = run_id;
-  $("kv-run").textContent = run_id;
+  state.live = true;
+  updateControls();
 
   const src = new EventSource(`/api/runs/${run_id}/events`);
   state.source = src;
-  src.onmessage = (e) => onEvent(JSON.parse(e.data));
+  src.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    // A reconnect replays the whole history, so skip anything already rendered.
+    if (ev.seq != null) {
+      if (ev.seq <= state.lastSeq) return;
+      state.lastSeq = ev.seq;
+    }
+    onEvent(ev);
+  };
   src.onerror = () => {
-    src.close();
-    if (state.timer) clearInterval(state.timer);
-    if (state.live) setAgentStatus(state.interrupted ? "interrupted" : "failed");
-    setComposer(false);
-    setRunControlsEnabled(true);
+    // EventSource reconnects on its own. Only a confirmed server-side status
+    // change ends the run — a dropped connection does not.
+    if (state.runComplete) {
+      src.close();
+      return;
+    }
+    confirmRunStatus();
   };
 }
 
-function softStop() {
-  if (state.source) {
-    state.source.close();
-    state.source = null;
+async function confirmRunStatus() {
+  if (!state.runId || state.runComplete) return;
+  try {
+    const res = await fetch(`/api/runs/${state.runId}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.status === "running") return;
+    if (state.source) state.source.close();
+    if (state.timer) clearInterval(state.timer);
+    setLiveState(state.interrupted ? "interrupted" : "failed");
+    finishUI();
+  } catch {
+    // network still down; the next reconnect attempt will retry
   }
-  if (state.timer) {
-    clearInterval(state.timer);
-    state.timer = null;
-  }
-  state.live = false;
 }
 
-// ---------- SSE events ----------
+function softStop() {
+  if (state.source) { state.source.close(); state.source = null; }
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  state.live = false;
+  state.runComplete = true;
+}
+
+function finishUI() {
+  state.live = false;
+  state.runComplete = true;
+  updateControls();
+}
+
+// ===================== SSE EVENTS =====================
 
 function onEvent(ev) {
   switch (ev.type) {
     case "run_started":
-      if (ev.model) {
-        state.model = ev.model;
-        $("kv-model").textContent = ev.model;
-      }
-      if (ev.provider) {
-        state.provider = ev.provider;
-        $("kv-provider").textContent = PROVIDER_LABELS[ev.provider] || ev.provider;
-      }
-      setLiveLabel(`running · ${ev.provider || ""}`);
+      if (ev.model) { state.model = ev.model; $("topbar-model").textContent = ev.model; }
+      if (ev.max_steps) state.stepsMax = ev.max_steps;
+      if (ev.max_tokens) state.tokensMax = ev.max_tokens;
       break;
 
     case "workspace_ready":
       mountFiles(ev.files || []);
-      addEvent({
-        kind: "workspace",
-        icon: "▣",
-        type: "Workspace inspected",
-        desc: `Agent inspected available workspace files (${(ev.files || []).length} available)`,
-        status: "ok",
-      });
+      addSysCard("▣", `Workspace mounted · ${(ev.files || []).length} files`);
       break;
 
     case "harness_prompt":
-      // Internal — skip (would expose system prompt)
       break;
 
     case "step_started": {
-      const div = document.createElement("div");
-      div.className = "step-mark";
-      const tok = ev.tokens_used ? ` · ${(ev.tokens_used / 1000).toFixed(1)}k tok` : "";
-      div.textContent = `Step ${ev.step}${tok}`;
-      $("timeline").appendChild(div);
-      setLiveLabel(`step ${ev.step}`);
+      state.currentStep = ev.step;
+      if (ev.tokens_used) state.tokensUsed = ev.tokens_used;
+      $("topbar-steps").textContent = `Step ${ev.step}/${state.stepsMax}`;
+      $("topbar-tokens").textContent = formatTokens(state.tokensUsed);
+      getOrCreateStep(ev.step);
+      // Mark previous step as done
+      if (ev.step > 1) {
+        const prev = state.stepCards.get(ev.step - 1);
+        if (prev && prev.el.dataset.status === "running") prev.el.dataset.status = "done";
+      }
       break;
     }
 
     case "llm_request":
-      addEvent({
-        kind: "llm",
-        icon: "◇",
-        type: safeLlmLabel(),
-        desc: observableLlmDesc(),
-        status: "running",
-      });
-      state.llmPhase += 1;
       break;
 
-    case "llm_thinking":
-      // Never show chain-of-thought. Local scripted runs have no llm_request, so emit a safe status.
-      if (state.provider === "local") {
-        addEvent({
-          kind: "llm",
-          icon: "◇",
-          type: "Analyzing task",
-          desc: "Agent is determining next actions",
-          status: "running",
-        });
+    case "llm_thinking": {
+      const sc = getOrCreateStep(state.currentStep || 1);
+      if (ev.text) {
+        sc.thinkingText = (sc.thinkingText || "") + ev.text;
+        sc.thinkingEl.textContent = sc.thinkingText;
+        if (!sc.el.classList.contains("expanded")) {
+          sc.previewEl.textContent = clip(sc.thinkingText, 80);
+        }
       }
       break;
+    }
 
-    case "llm_text":
-      // Observable agent output (not hidden reasoning) — keep concise
+    case "llm_text": {
+      const sc = getOrCreateStep(state.currentStep || 1);
       if (ev.text && String(ev.text).trim()) {
-        addEvent({
-          kind: "llm",
-          icon: "◇",
-          type: "Agent update",
-          desc: clip(String(ev.text).trim(), 400),
-          status: "ok",
-        });
+        sc.textEl.textContent = (sc.textEl.textContent || "") + ev.text;
+        sc.textEl.style.display = "block";
+        if (!sc.thinkingText && !sc.el.classList.contains("expanded")) {
+          sc.previewEl.textContent = clip(ev.text, 80);
+        }
       }
       break;
+    }
 
     case "tokens":
+      if (ev.total) {
+        state.tokensUsed = ev.total;
+        $("topbar-tokens").textContent = formatTokens(ev.total);
+      }
       break;
 
     case "tool_call":
-      addToolEvent(ev);
-      inferFileFromTool(ev.name, ev.args, "selected");
+      addToolChip(ev);
+      inferFileFromTool(ev.name, ev.args);
       break;
 
     case "tool_result":
-      resolveToolEvent(ev);
+      resolveToolChip(ev);
       break;
 
     case "file_touch":
@@ -411,119 +372,79 @@ function onEvent(ev) {
       break;
 
     case "user_message":
-      addEvent({
-        kind: "human",
-        icon: "☺",
-        type: "Human Supervisor",
-        desc: ev.text,
-        status: "ok",
-        human: true,
-      });
+      addOperatorCard("☺", "Human guidance queued", ev.text);
+      state.guidancePending = true;
+      break;
+
+    case "guidance_queued":
+      state.guidancePending = true;
+      if (!state.interrupted) setLiveState("queued");
       break;
 
     case "user_message_injected":
-      addEvent({
-        kind: "human",
-        icon: "↳",
-        type: "Agent received guidance",
-        desc: `Guidance delivered at step ${ev.step}`,
-        status: "ok",
-      });
+      state.guidancePending = false;
+      addOperatorCard(
+        "↳",
+        "Guidance applied",
+        `Applied before step ${ev.step}${ev.text ? `: ${ev.text}` : ""}`
+      );
+      if (!state.paused && !state.interrupted) setLiveState("running");
       break;
 
     case "paused":
       state.paused = true;
-      if (!state.interrupted) setAgentStatus("paused");
-      updateControlButtons();
-      if (!state.interrupted) {
-        addEvent({
-          kind: "human",
-          icon: "Ⅱ",
-          type: "Agent paused",
-          desc: "Supervisor paused the agent — it will hold before the next step",
-          status: "ok",
-        });
-      }
+      if (!state.interrupted) setLiveState("paused");
+      updateControls();
       break;
 
     case "resumed":
       state.paused = false;
       state.waiting = false;
-      $("waiting-block").classList.add("hidden");
-      if (!state.interrupted) setAgentStatus("running");
-      updateControlButtons();
-      if (!state.interrupted) {
-        addEvent({
-          kind: "ok",
-          icon: "▶",
-          type: "Agent resumed",
-          desc:
-            ev.reason === "user message"
-              ? "Agent resumed execution after guidance"
-              : "Agent resumed execution",
-          status: "ok",
-        });
-      }
+      $("waiting-banner").classList.add("hidden");
+      if (!state.interrupted) setLiveState(state.guidancePending ? "queued" : "running");
+      updateControls();
       break;
 
     case "answer":
       state.lastAnswer = ev.text;
-      $("answer").textContent = ev.text;
-      addEvent({
-        kind: "ok",
-        icon: "★",
-        type: "Final answer ready",
-        desc: "Agent prepared the final deliverable",
-        status: "ok",
-      });
       break;
 
     case "grade":
       state.lastGrade = ev;
-      renderGrade(ev);
       break;
 
     case "error":
-      addEvent({
-        kind: "err",
-        icon: "!",
-        type: "Error",
-        desc: ev.message || "Unknown error",
-        status: "bad",
-      });
+      addSysCard("!", ev.message || "Unknown error", true);
       break;
 
     case "run_finished": {
+      state.runComplete = true;
       if (state.timer) clearInterval(state.timer);
       if (state.source) state.source.close();
-      const st = mapFinishedStatus(ev.status);
-      setAgentStatus(st);
-      setComposer(false);
-      const elapsed = ev.elapsed_ms || Date.now() - state.t0;
-      $("live-timer").textContent = `${(elapsed / 1000).toFixed(1)}s`;
-      if (ev.answer && !state.lastAnswer) {
-        state.lastAnswer = ev.answer;
-        $("answer").textContent = ev.answer;
-      }
-      // Settle file statuses: used → completed, never touched → not accessed
+      const elapsed = ev.elapsed_ms || (Date.now() - state.t0);
+      $("topbar-timer").textContent = `${(elapsed / 1000).toFixed(1)}s`;
+      if (ev.answer && !state.lastAnswer) state.lastAnswer = ev.answer;
+
+      // Settle files
       for (const [path, f] of state.files) {
-        if (f.status === "reading" || f.status === "in_use") {
-          f.status = "completed";
-        } else if (f.status === "available") {
-          f.status = "not_accessed";
-        }
+        if (f.status === "reading" || f.status === "in_use") f.status = "completed";
+        else if (f.status === "available") f.status = "not_accessed";
         updateFileRow(path);
       }
-      addEvent({
-        kind: st === "failed" || st === "interrupted" ? "err" : "ok",
-        icon: st === "completed" ? "✓" : "■",
-        type: st === "completed" ? "Task completed" : `Run ${st}`,
-        desc: `Status: ${ev.status || st}`,
-        status: st === "completed" ? "ok" : "bad",
-      });
-      if (st === "completed" || state.lastAnswer) {
-        showResult(true);
+
+      // Mark last step done
+      const last = state.stepCards.get(state.currentStep);
+      if (last && last.el.dataset.status === "running") {
+        last.el.dataset.status = ev.status === "error" || ev.status === "no_submit" ? "error" : "done";
       }
+
+      const st = mapFinishedStatus(ev.status);
+      setLiveState(st);
+      finishUI();
+
+      // Result card
+      if (state.lastAnswer || state.lastGrade) renderResult();
+
       pushHistory({
         runId: state.runId,
         task: state.currentTask?.task_name || "—",
@@ -532,22 +453,18 @@ function onEvent(ev) {
         provider: state.provider,
         status: st,
         durationMs: elapsed,
-        score: state.lastGrade
-          ? `${state.lastGrade.passed}/${state.lastGrade.total}`
-          : "—",
+        score: state.lastGrade ? `${state.lastGrade.passed}/${state.lastGrade.total}` : "—",
         scoreOk: state.lastGrade?.score === 1,
         date: new Date().toISOString(),
       });
-      setRunControlsEnabled(true);
       break;
     }
-
-    case "log":
-      break;
 
     default:
       break;
   }
+
+  if (state.autoFollow) scrollToBottom();
 }
 
 function mapFinishedStatus(s) {
@@ -557,107 +474,400 @@ function mapFinishedStatus(s) {
   return s || "completed";
 }
 
-function safeLlmLabel() {
-  const labels = [
-    "Analyzing task",
-    "Selecting relevant files",
-    "Preparing tool call",
-    "Processing tool result",
-    "Preparing final response",
-  ];
-  return labels[state.llmPhase % labels.length];
+// ===================== STEP CARDS =====================
+
+function getOrCreateStep(stepNum) {
+  if (state.stepCards.has(stepNum)) return state.stepCards.get(stepNum);
+
+  const el = document.createElement("div");
+  el.className = "step-card";
+  el.dataset.step = stepNum;
+  el.dataset.status = "running";
+
+  const header = document.createElement("div");
+  header.className = "step-header";
+  header.innerHTML = `
+    <div class="step-left">
+      <span class="step-dot"></span>
+      <span class="step-label">Step ${stepNum}</span>
+      <span class="step-preview"></span>
+    </div>
+    <div class="step-meta"></div>
+  `;
+
+  const body = document.createElement("div");
+  body.className = "step-body";
+
+  const thinking = document.createElement("div");
+  thinking.className = "step-thinking";
+
+  const text = document.createElement("div");
+  text.className = "step-text";
+  text.style.display = "none";
+
+  const tools = document.createElement("div");
+  tools.className = "step-tools";
+
+  body.appendChild(thinking);
+  body.appendChild(text);
+  body.appendChild(tools);
+  el.appendChild(header);
+  el.appendChild(body);
+
+  header.addEventListener("click", () => toggleStep(stepNum));
+
+  $("step-rail").appendChild(el);
+
+  const card = {
+    el,
+    header,
+    body,
+    thinkingEl: thinking,
+    textEl: text,
+    toolsEl: tools,
+    previewEl: header.querySelector(".step-preview"),
+    metaEl: header.querySelector(".step-meta"),
+    expanded: false,
+    thinkingText: "",
+    toolWraps: new Map(),
+  };
+  state.stepCards.set(stepNum, card);
+  return card;
 }
 
-function observableLlmDesc() {
-  const descs = [
-    "Agent is analyzing the accounting task",
-    "Agent is deciding which workspace files are relevant",
-    "Agent is preparing the next tool action",
-    "Agent is incorporating the latest tool output",
-    "Agent is preparing its response",
-  ];
-  return descs[state.llmPhase % descs.length];
+function toggleStep(stepNum) {
+  const card = state.stepCards.get(stepNum);
+  if (!card) return;
+  card.expanded = !card.expanded;
+  card.el.classList.toggle("expanded", card.expanded);
+  state.focusedStep = card.expanded ? stepNum : 0;
 }
 
-// ---------- files ----------
+// ===================== TOOL CHIPS =====================
 
-function clearWorkspace() {
-  state.files.clear();
-  $("file-list").innerHTML = `<li class="empty">Workspace mounts when a run starts</li>`;
-  $("file-count").textContent = "0 files";
+function addToolChip(ev) {
+  const sc = getOrCreateStep(ev.step || state.currentStep || 1);
+  const label = TOOL_LABELS[ev.name] || ev.name;
+  const primaryArg = extractPrimaryArg(ev.name, ev.args);
+
+  const wrap = document.createElement("div");
+  wrap.className = "tool-wrap";
+  wrap.dataset.callId = ev.call_id;
+  wrap.dataset.status = "running";
+
+  const chip = document.createElement("div");
+  chip.className = "tool-chip";
+  chip.innerHTML = `
+    <span class="chip-icon">⚙</span>
+    <span class="chip-name">${esc(label)}</span>
+    ${primaryArg ? `<span class="chip-arg">${esc(primaryArg)}</span>` : ""}
+    <span class="chip-spacer"></span>
+    <span class="chip-stat run">Running…</span>
+    <div class="chip-actions">
+      <button class="chip-btn" data-action="approve" title="Approve">👍</button>
+      <button class="chip-btn" data-action="flag" title="Flag issue">👎</button>
+      <button class="chip-btn" data-action="comment" title="Comment">✎</button>
+    </div>
+  `;
+
+  const detail = document.createElement("div");
+  detail.className = "tool-detail";
+  detail.innerHTML = `
+    <div class="tool-section"><div class="tool-section-head">Input</div><pre>${esc(shortArgs(ev.name, ev.args))}</pre></div>
+    <div class="tool-section"><div class="tool-section-head">Output</div><pre class="tool-output">Waiting…</pre></div>
+  `;
+
+  wrap.appendChild(chip);
+  wrap.appendChild(detail);
+  sc.toolsEl.appendChild(wrap);
+
+  // Toggle detail on chip click
+  chip.addEventListener("click", (e) => {
+    if (e.target.closest(".chip-btn")) return;
+    wrap.classList.toggle("detail-open");
+  });
+
+  // Review actions
+  chip.querySelectorAll(".chip-btn").forEach((btn) => {
+    btn.addEventListener("click", () => handleReviewAction(btn.dataset.action, ev.call_id, ev.step || state.currentStep, ev.name));
+  });
+
+  state.toolData.set(ev.call_id, { name: ev.name, args: ev.args, step: ev.step || state.currentStep, wrap, chip, detail });
 }
+
+function resolveToolChip(ev) {
+  const td = state.toolData.get(ev.call_id);
+  if (!td) return;
+  td.wrap.dataset.status = ev.ok ? "ok" : "error";
+  const statEl = td.chip.querySelector(".chip-stat");
+  statEl.textContent = `${ev.ok ? "✓" : "✗"} ${ev.ms}ms`;
+  statEl.className = `chip-stat ${ev.ok ? "ok" : "bad"}`;
+  const outPre = td.detail.querySelector(".tool-output");
+  outPre.textContent = clip(ev.preview || "(no output)", 4000);
+  if (!ev.ok) td.wrap.classList.add("detail-open");
+  td.result = ev;
+}
+
+function extractPrimaryArg(name, args) {
+  if (!args) return "";
+  if (args.path && args.path !== ".") return basename(args.path);
+  if (name === "run_python") return "script";
+  if (name === "submit_answer") return "answer";
+  return "";
+}
+
+// ===================== REVIEW ACTIONS =====================
+
+function handleReviewAction(action, callId, step, toolName) {
+  const td = state.toolData.get(callId);
+  if (!td) return;
+
+  // Clear all active states on this chip's buttons
+  td.chip.querySelectorAll(".chip-btn").forEach((b) => b.classList.remove("active"));
+
+  // Remove any previous review badge
+  td.chip.querySelector(".review-badge")?.remove();
+
+  if (action === "approve") {
+    state.flags.delete(callId);
+    td.wrap.dataset.status = "approved";
+    td.chip.querySelector('[data-action="approve"]').classList.add("active");
+    const badge = document.createElement("span");
+    badge.className = "review-badge approved";
+    badge.textContent = "Approved";
+    td.chip.querySelector(".chip-spacer").after(badge);
+  } else if (action === "flag") {
+    state.flags.set(callId, { step, tool: toolName, type: "flag" });
+    td.wrap.dataset.status = "flagged";
+    td.chip.querySelector('[data-action="flag"]').classList.add("active");
+    const badge = document.createElement("span");
+    badge.className = "review-badge flagged";
+    badge.textContent = "Flagged";
+    td.chip.querySelector(".chip-spacer").after(badge);
+    const sc = state.stepCards.get(step);
+    if (sc) sc.el.dataset.status = "flagged";
+    prefillComposer(step, toolName);
+  } else if (action === "comment") {
+    prefillComposer(step, toolName);
+    $("say").focus();
+    return;
+  }
+  renderFlags();
+}
+
+function prefillComposer(step, toolName) {
+  const ctx = $("composer-context");
+  ctx.textContent = `Re: step ${step}, ${toolName}`;
+  ctx.classList.remove("hidden");
+  $("say").placeholder = `Feedback on step ${step} ${toolName}…`;
+}
+
+function renderFlags() {
+  const list = $("flagged-list");
+  const count = state.flags.size;
+  $("flag-count").textContent = count;
+  $("flag-count").classList.toggle("hidden", count === 0);
+
+  if (count === 0) {
+    list.innerHTML = '<li class="empty">No flags yet</li>';
+    return;
+  }
+  list.innerHTML = "";
+  for (const [callId, flag] of state.flags) {
+    const li = document.createElement("li");
+    li.className = "flag-item";
+    li.innerHTML = `<span class="flag-step">Step ${flag.step}</span><span class="flag-tool">${esc(flag.tool)}</span>`;
+    li.addEventListener("click", () => {
+      // Scroll to the tool wrap
+      const td = state.toolData.get(callId);
+      if (td) {
+        const sc = state.stepCards.get(flag.step);
+        if (sc && !sc.expanded) toggleStep(flag.step);
+        td.wrap.scrollIntoView({ behavior: "smooth", block: "center" });
+        td.wrap.classList.add("detail-open");
+      }
+    });
+    list.appendChild(li);
+  }
+}
+
+// ===================== SYSTEM / OPERATOR CARDS =====================
+
+function addSysCard(icon, text, isError) {
+  const el = document.createElement("div");
+  el.className = "sys-card";
+  if (isError) el.style.borderColor = "var(--bad-soft)";
+  el.innerHTML = `<span class="sys-icon">${icon}</span><span class="sys-text">${esc(text)}</span>`;
+  $("step-rail").appendChild(el);
+}
+
+function addOperatorCard(icon, label, text) {
+  const el = document.createElement("div");
+  el.className = "operator-card";
+  el.innerHTML = `
+    <span class="op-icon">${icon}</span>
+    <div class="op-body">
+      <div class="op-label">${esc(label)}</div>
+      <div>${esc(text)}</div>
+    </div>
+  `;
+  $("step-rail").appendChild(el);
+}
+
+// ===================== RESULT =====================
+
+function renderResult() {
+  const rail = $("step-rail");
+  const el = document.createElement("div");
+  el.className = "result-card";
+
+  const answer = state.lastAnswer || "(no answer submitted)";
+  const grade = state.lastGrade;
+  let gradeHtml = "";
+
+  if (grade) {
+    const criteria = (grade.criteria || [])
+      .map((c, index) => renderCriterion(c, index))
+      .join("");
+    const pct = Math.round((grade.score || 0) * 100);
+    const allPassed = grade.score === 1;
+    gradeHtml = `
+      <section class="evaluation-panel">
+        <div class="eval-summary">
+          <div>
+            <h3>Evaluation</h3>
+            <div class="eval-verdict ${allPassed ? "ok" : "bad"}">${allPassed ? "All criteria passed" : "Review required"}</div>
+          </div>
+          <div class="score-block ${allPassed ? "ok" : "bad"}">
+            <strong>${grade.passed}/${grade.total}</strong>
+            <span>${pct}%</span>
+          </div>
+        </div>
+        <div class="score-track"><span style="width:${pct}%"></span></div>
+        <div class="rubric">${criteria}</div>
+        <p class="eval-method">${esc(grade.method || "Automated rubric evaluation")}</p>
+      </section>
+    `;
+    const reference = grade.gold
+      ? `<section class="reference-output">
+          <h3>Reference output</h3>
+          <pre>${esc(typeof grade.gold === "string" ? grade.gold : JSON.stringify(grade.gold, null, 2))}</pre>
+        </section>`
+      : "";
+    $("eval-full").innerHTML = `
+      <div class="drawer-score ${allPassed ? "ok" : "bad"}">
+        <strong>${pct}%</strong>
+        <span>${grade.passed} of ${grade.total} criteria passed</span>
+      </div>
+      <div class="rubric">${criteria}</div>
+      ${reference}
+    `;
+  }
+
+  el.innerHTML = `
+    <div class="result-title">
+      <div>
+        <span class="eyebrow">Run complete</span>
+        <h2>Final answer</h2>
+      </div>
+      <span class="completion-check">✓</span>
+    </div>
+    <div class="result-answer">${formatAnswerHtml(answer)}</div>
+    ${gradeHtml}
+    <div class="result-actions">
+      <button type="button" class="btn ghost sm" id="btn-full-eval">View Full Evaluation</button>
+      <button type="button" class="btn ghost sm" id="btn-new-run-result">New Run</button>
+    </div>
+  `;
+  rail.appendChild(el);
+
+  el.querySelector("#btn-full-eval")?.addEventListener("click", () => {
+    $("eval-drawer").classList.remove("hidden");
+    $("eval-drawer").setAttribute("aria-hidden", "false");
+  });
+  el.querySelector("#btn-new-run-result")?.addEventListener("click", goToSetup);
+}
+
+function renderCriterion(c, index) {
+  return `
+    <div class="crit ${c.met ? "met" : "miss"}">
+      <span class="crit-icon">${c.met ? "✓" : "!"}</span>
+      <div class="crit-body">
+        <div class="crit-top">
+          <span>Criterion ${index + 1}</span>
+          ${c.type ? `<span class="crit-type">${esc(c.type)}</span>` : ""}
+        </div>
+        <p>${esc(c.description)}</p>
+        ${c.matched != null ? `<span class="crit-match">Matched: ${esc(c.matched)}</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function formatAnswerHtml(answer) {
+  return String(answer)
+    .split(/\r?\n/)
+    .map((raw) => {
+      const line = raw.trim();
+      if (!line) return '<div class="answer-space"></div>';
+      const escaped = esc(line);
+      if (/^\d+\.\s/.test(line)) return `<div class="answer-entry">${escaped}</div>`;
+      if (/^-\s*(Debit|Credit):/i.test(line)) {
+        const kind = /^-\s*Debit:/i.test(line) ? "debit" : "credit";
+        return `<div class="answer-ledger ${kind}"><span>${kind === "debit" ? "DR" : "CR"}</span><p>${escaped.replace(/^-\s*(Debit|Credit):\s*/i, "")}</p></div>`;
+      }
+      if (/^(Explanation|Therefore|Conclusion|Proposed JE|Date|Memo):?/i.test(line)) {
+        return `<div class="answer-emphasis">${escaped}</div>`;
+      }
+      return `<p>${escaped}</p>`;
+    })
+    .join("");
+}
+
+// ===================== FILES =====================
 
 function mountFiles(files) {
   state.files.clear();
   const list = $("file-list");
-  list.innerHTML = "";
   const visible = (files || []).filter((f) => !f.dir && !String(f.path).startsWith(".__"));
   if (!visible.length) {
-    list.innerHTML = `<li class="empty">No files in workspace</li>`;
+    list.innerHTML = '<li class="empty">No files in workspace</li>';
     $("file-count").textContent = "0 files";
+    $("topbar-files").textContent = "Files (0)";
     return;
   }
+  list.innerHTML = "";
   for (const f of visible) {
-    const path = f.path;
-    state.files.set(path, { path, status: "available", dir: !!f.dir });
-    list.appendChild(fileRow(path));
+    state.files.set(f.path, { path: f.path, status: "available", dir: false });
+    list.appendChild(fileRow(f.path));
   }
-  // After mount, show not_accessed until touched — still "available" initially per spec
   $("file-count").textContent = `${visible.length} files`;
+  $("topbar-files").textContent = `Files (${visible.length})`;
 }
 
 function fileRow(path) {
-  const f = state.files.get(path);
   const li = document.createElement("li");
   li.className = "file-item";
   li.dataset.path = path;
-  li.dataset.status = f.status;
-  const name = basename(path);
-  const type = fileTypeLabel(name);
-  li.innerHTML = `
-    <span class="icon"></span>
-    <span class="file-main">
-      <span class="name" title="${escAttr(path)}">${esc(name)}</span>
-      <span class="ftype">${esc(type)}</span>
-    </span>
-    <span class="st">${FILE_STATUS_LABEL[f.status] || f.status}</span>
-  `;
+  li.dataset.status = "available";
+  li.innerHTML = `<span class="icon"></span><span class="fname" title="${escAttr(path)}">${esc(basename(path))}</span><span class="fstat">Available</span>`;
   return li;
-}
-
-function fileTypeLabel(name) {
-  const ext = String(name).split(".").pop()?.toLowerCase() || "";
-  const map = {
-    xlsx: "Excel",
-    xls: "Excel",
-    csv: "CSV",
-    pdf: "PDF",
-    txt: "Text",
-    json: "JSON",
-    md: "Markdown",
-  };
-  return map[ext] || (ext ? ext.toUpperCase() : "File");
-}
-
-function findFileRow(path) {
-  return [...$("file-list").children].find((li) => li.dataset.path === path);
 }
 
 function updateFileRow(path) {
   const f = state.files.get(path);
   if (!f) return;
-  let li = findFileRow(path);
+  let li = [...$("file-list").children].find((el) => el.dataset?.path === path);
   if (!li) {
-    // File discovered via touch but not in initial mount list
-    state.files.set(path, f);
     li = fileRow(path);
     const empty = $("file-list").querySelector(".empty");
     if (empty) empty.remove();
     $("file-list").appendChild(li);
     $("file-count").textContent = `${state.files.size} files`;
+    $("topbar-files").textContent = `Files (${state.files.size})`;
   }
   li.dataset.status = f.status;
-  li.querySelector(".st").textContent = FILE_STATUS_LABEL[f.status] || f.status;
+  li.querySelector(".fstat").textContent = FILE_STATUS_LABEL[f.status] || f.status;
   li.classList.remove("flash");
   void li.offsetWidth;
   li.classList.add("flash");
@@ -666,9 +876,7 @@ function updateFileRow(path) {
 function ensureFile(path) {
   if (!path || path === "." || path.startsWith(".__")) return null;
   const norm = path.replace(/^\.\//, "");
-  if (!state.files.has(norm)) {
-    state.files.set(norm, { path: norm, status: "available", dir: false });
-  }
+  if (!state.files.has(norm)) state.files.set(norm, { path: norm, status: "available", dir: false });
   return norm;
 }
 
@@ -677,478 +885,315 @@ function onFileTouch(ev) {
   if (!path) return;
   const f = state.files.get(path);
   const action = ev.action || "read";
-  let status = "in_use";
-  let type = "File selected";
-  let desc = `Agent selected ${basename(path)}`;
-
-  if (action === "list" || action === "stat") {
-    status = f.status === "available" || f.status === "not_accessed" ? "available" : f.status;
-    // Don't spam timeline for list of "."
-    if (path === "." || action === "list") return;
-  } else if (action === "read" || action === "inspect") {
-    status = "reading";
-    type = "File opened";
-    desc = `Reading ${basename(path)}`;
-  } else if (action === "exec") {
-    return;
-  } else {
-    status = "in_use";
-  }
-
-  // Promote reading -> in_use after a beat via status; keep reading visible
-  if (f.status === "reading" && status === "reading") status = "in_use";
-  f.status = status;
+  if (action === "list" || action === "stat" || action === "exec") return;
+  if (action === "read" || action === "inspect") f.status = f.status === "reading" ? "in_use" : "reading";
+  else f.status = "in_use";
   updateFileRow(path);
-
-  addEvent({
-    kind: "file",
-    icon: "📄",
-    type,
-    desc: `${desc}\nAgent accessed file`,
-    status: "ok",
-    time: true,
-  });
-
-  // After reading, settle to in_use
-  if (status === "reading") {
+  if (f.status === "reading") {
     setTimeout(() => {
       const cur = state.files.get(path);
-      if (cur && cur.status === "reading") {
-        cur.status = "in_use";
-        updateFileRow(path);
-      }
+      if (cur && cur.status === "reading") { cur.status = "in_use"; updateFileRow(path); }
     }, 1200);
   }
 }
 
-function inferFileFromTool(name, args, mode) {
-  if (!args) return;
-  const path = args.path;
-  if (!path || path === ".") return;
-  const norm = ensureFile(path);
+function inferFileFromTool(name, args) {
+  if (!args || !args.path || args.path === ".") return;
+  const norm = ensureFile(args.path);
   if (!norm) return;
-  const f = state.files.get(norm);
   if (name === "list_dir") return;
+  const f = state.files.get(norm);
   if (["read_file", "inspect_xlsx", "read_xlsx", "read_pdf"].includes(name)) {
     if (f.status === "available" || f.status === "not_accessed") {
       f.status = "reading";
       updateFileRow(norm);
-      addEvent({
-        kind: "file",
-        icon: "📄",
-        type: "File selected",
-        desc: `Agent selected ${basename(norm)}`,
-        status: "ok",
-      });
     }
   }
 }
 
-// ---------- timeline / tools ----------
+// ===================== CONTROLS =====================
 
-function addEvent({ kind, icon, type, desc, status, human, detailsHtml }) {
-  const el = document.createElement("div");
-  el.className = `ev${human ? " human" : ""}`;
-  el.dataset.kind = kind || "llm";
-  const stClass = status === "running" ? "running" : status === "bad" ? "bad" : status === "ok" ? "ok" : "";
-  el.innerHTML = `
-    <div class="ev-icon">${icon || "●"}</div>
-    <div class="ev-body">
-      <div class="ev-top">
-        <span class="ev-type">${esc(type)}</span>
-        <div class="ev-meta">
-          ${status ? `<span class="ev-status ${stClass}">${esc(status)}</span>` : ""}
-          <span class="ev-time">${nowTime()}</span>
-        </div>
-      </div>
-      <p class="ev-desc">${esc(desc)}</p>
-      ${detailsHtml || ""}
-    </div>
-  `;
-  $("timeline").appendChild(el);
-  el.scrollIntoView({ block: "end", behavior: "smooth" });
-  return el;
-}
-
-function addToolEvent(ev) {
-  const label = TOOL_LABELS[ev.name] || ev.name;
-  const details = `
-    <div class="tcard" data-call="${escAttr(ev.call_id)}">
-      <div class="tcard-head">
-        <span class="tname">${esc(label)}</span>
-        <span class="tstat run">Running…</span>
-      </div>
-      <details class="tsec"><summary>Input</summary><pre>${esc(shortArgs(ev.name, ev.args))}</pre></details>
-      <details class="tsec out hidden"><summary>Output</summary><pre></pre></details>
-    </div>
-  `;
-  const wrap = addEvent({
-    kind: "tool",
-    icon: "⚙",
-    type: "Tool called",
-    desc: label,
-    status: "running",
-    detailsHtml: details,
-  });
-  const card = wrap.querySelector(".tcard");
-  state.cards.set(ev.call_id, {
-    el: card,
-    statEl: card.querySelector(".tstat"),
-    outDetails: card.querySelector(".tsec.out"),
-    outPre: card.querySelector(".tsec.out pre"),
-    wrap,
+function bindRunEvents() {
+  $("btn-pause-toggle").addEventListener("click", async () => {
+    if (!canControlRun()) return;
+    const button = $("btn-pause-toggle");
+    button.disabled = true;
+    if (state.paused) {
+      button.textContent = "Resuming…";
+      state.waiting = false;
+      $("waiting-banner").classList.add("hidden");
+      const response = await fetch(`/api/runs/${state.runId}/resume`, { method: "POST" }).catch(() => null);
+      if (response?.ok) {
+        state.paused = false;
+        setLiveState(state.guidancePending ? "queued" : "running");
+      }
+    } else {
+      button.textContent = "Pausing…";
+      const response = await fetch(`/api/runs/${state.runId}/pause`, { method: "POST" }).catch(() => null);
+      if (response?.ok) {
+        state.paused = true;
+        setLiveState("paused");
+      }
+    }
+    updateControls();
   });
 
-  if (ev.name === "submit_answer") {
-    addEvent({
-      kind: "ok",
-      icon: "★",
-      type: "Preparing final response",
-      desc: "Agent is submitting the final answer",
-      status: "running",
-    });
-  } else if (ev.name === "run_python") {
-    addEvent({
-      kind: "tool",
-      icon: "∑",
-      type: "Running analysis",
-      desc: "Python analysis tool",
-      status: "running",
-    });
-  }
-}
+  $("btn-interrupt").addEventListener("click", interruptAgent);
 
-function resolveToolEvent(ev) {
-  const card = state.cards.get(ev.call_id);
-  const label = TOOL_LABELS[ev.name] || ev.name;
-  if (card) {
-    card.statEl.textContent = `${ev.ok ? "Completed" : "Failed"} · ${ev.ms}ms`;
-    card.statEl.className = `tstat ${ev.ok ? "ok" : "bad"}`;
-    card.outDetails.classList.remove("hidden");
-    if (!ev.ok) card.outDetails.open = true;
-    card.outPre.textContent = clip(ev.preview, 4000);
-    const st = card.wrap.querySelector(".ev-status");
-    if (st) {
-      st.textContent = ev.ok ? "ok" : "bad";
-      st.className = `ev-status ${ev.ok ? "ok" : "bad"}`;
+  $("btn-new-run").addEventListener("click", goToSetup);
+
+  $("btn-send").addEventListener("click", sendGuidance);
+  $("say").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendGuidance(); }
+  });
+
+  $("btn-continue").addEventListener("click", async () => {
+    state.waiting = false;
+    $("waiting-banner").classList.add("hidden");
+    if (canControlRun()) await fetch(`/api/runs/${state.runId}/resume`, { method: "POST" }).catch(() => {});
+  });
+
+  $("btn-focus-say").addEventListener("click", () => $("say").focus());
+
+  // Topbar dropdowns
+  $("topbar-task").addEventListener("click", () => toggleDropdown("prompt-dropdown"));
+  $("topbar-files").addEventListener("click", () => toggleDropdown("files-dropdown"));
+  $("btn-close-prompt-dd").addEventListener("click", () => closeDropdowns());
+
+  // Close dropdowns on outside click
+  document.addEventListener("click", (e) => {
+    if (state.openDropdown && !e.target.closest(".dropdown-panel") && !e.target.closest(".topbar-chip")) closeDropdowns();
+  });
+
+  // History
+  $("btn-close-history").addEventListener("click", closeHistory);
+  $("history-backdrop").addEventListener("click", closeHistory);
+  $("btn-clear-history").addEventListener("click", () => { state.history = []; saveHistory(); renderHistory(); });
+
+  // Eval
+  $("btn-close-eval").addEventListener("click", closeEval);
+  $("eval-backdrop").addEventListener("click", closeEval);
+
+  // Auto-follow: detect manual scroll
+  $("step-rail").addEventListener("scroll", () => {
+    const rail = $("step-rail");
+    const atBottom = rail.scrollHeight - rail.scrollTop - rail.clientHeight < 60;
+    if (atBottom) {
+      state.autoFollow = true;
+      $("jump-live").classList.add("hidden");
+    } else if (state.live) {
+      state.autoFollow = false;
+      $("jump-live").classList.remove("hidden");
     }
-  } else {
-    addEvent({
-      kind: ev.ok ? "tool" : "err",
-      icon: "⚙",
-      type: "Tool completed",
-      desc: `${label} · ${ev.ok ? "ok" : "failed"} · ${ev.ms}ms`,
-      status: ev.ok ? "ok" : "bad",
-    });
-  }
+  });
+
+  $("jump-live").addEventListener("click", () => {
+    state.autoFollow = true;
+    $("jump-live").classList.add("hidden");
+    scrollToBottom();
+  });
 }
-
-// ---------- grade / result ----------
-
-function renderGrade(ev) {
-  $("score").textContent = `${ev.passed}/${ev.total}`;
-  $("score").className = `score ${ev.score === 1 ? "ok" : "bad"}`;
-  $("rubric").innerHTML = (ev.criteria || [])
-    .map(
-      (c) =>
-        `<div class="crit ${c.met ? "met" : "miss"}">${c.met ? "✓" : "✗"} ${esc(
-          c.description
-        )}</div>`
-    )
-    .join("");
-  $("eval-full").innerHTML = `
-    <p><strong>Score:</strong> ${ev.passed}/${ev.total} (${Math.round((ev.score || 0) * 100)}%)</p>
-    <div class="rubric">${$("rubric").innerHTML}</div>
-    ${
-      ev.gold
-        ? `<h3 style="margin-top:16px;font-size:12px;color:var(--mute)">Reference output</h3><pre>${esc(
-            typeof ev.gold === "string" ? ev.gold : JSON.stringify(ev.gold, null, 2)
-          )}</pre>`
-        : ""
-    }
-  `;
-}
-
-function showSetup(on) {
-  $("setup").classList.toggle("hidden", !on);
-  if (on) {
-    $("timeline-wrap").classList.add("hidden");
-    $("result").classList.add("hidden");
-  }
-}
-
-function showResult(on) {
-  $("result").classList.toggle("hidden", !on);
-  if (on) $("timeline-wrap").classList.add("hidden");
-}
-
-$("btn-show-timeline").addEventListener("click", () => {
-  $("result").classList.add("hidden");
-  $("timeline-wrap").classList.remove("hidden");
-});
-
-$("btn-full-eval").addEventListener("click", () => {
-  $("eval-drawer").classList.remove("hidden");
-  $("eval-drawer").setAttribute("aria-hidden", "false");
-});
-$("btn-close-eval").addEventListener("click", closeEval);
-$("eval-backdrop").addEventListener("click", closeEval);
-function closeEval() {
-  $("eval-drawer").classList.add("hidden");
-  $("eval-drawer").setAttribute("aria-hidden", "true");
-}
-
-// ---------- supervisor controls ----------
-
-function setAgentStatus(s) {
-  state.agentStatus = s;
-  $("kv-status").textContent = s === "idle" ? "Ready" : statusTitle(s);
-  $("status-panel").dataset.state = s;
-  $("status-label").textContent = statusTitle(s);
-  $("status-help").textContent = statusHelp(s);
-  $("live-chip").dataset.state = s;
-  $("live-label").textContent = statusTitle(s);
-  updateControlButtons();
-}
-
-function statusTitle(s) {
-  return (
-    {
-      idle: "Idle",
-      running: "Running",
-      paused: "Paused",
-      waiting: "Waiting for Human",
-      completed: "Completed",
-      failed: "Failed",
-      interrupted: "Interrupted",
-    }[s] || s
-  );
-}
-
-function statusHelp(s) {
-  return (
-    {
-      idle: "Start a run to supervise the agent.",
-      running: "Agent is working autonomously. Intervene anytime.",
-      paused: "Agent is held between steps. Resume or send guidance.",
-      waiting: "The agent needs your input to continue.",
-      completed: "Run finished. Review the final answer and evaluation.",
-      failed: "The run ended with an error or missing submission.",
-      interrupted: "You interrupted the agent. Start a new run when ready.",
-    }[s] || ""
-  );
-}
-
-function setLiveLabel(base) {
-  // keep chip in sync; status title still drives main label when running
-  if (state.agentStatus === "running") {
-    $("live-label").textContent = "Running";
-  }
-}
-
-function setComposer(live) {
-  state.live = live;
-  $("say").disabled = !live;
-  $("btn-send").disabled = !live;
-  updateControlButtons();
-}
-
-function updateControlButtons() {
-  const live = state.live;
-  $("btn-pause").disabled = !live || state.paused || state.interrupted;
-  $("btn-resume").disabled = !live || (!state.paused && !state.waiting) || state.interrupted;
-  $("btn-interrupt").disabled = !live || state.interrupted;
-  $("btn-pause").textContent = "Pause Agent";
-  $("btn-resume").textContent = "Resume Agent";
-}
-
-$("btn-pause").addEventListener("click", async () => {
-  if (!state.runId || !state.live) return;
-  await fetch(`/api/runs/${state.runId}/pause`, { method: "POST" }).catch(() => {});
-});
-
-$("btn-resume").addEventListener("click", async () => {
-  if (!state.runId || !state.live) return;
-  state.waiting = false;
-  $("waiting-block").classList.add("hidden");
-  await fetch(`/api/runs/${state.runId}/resume`, { method: "POST" }).catch(() => {});
-});
-
-$("btn-interrupt").addEventListener("click", interruptAgent);
-$("btn-interrupt-wait").addEventListener("click", interruptAgent);
 
 async function interruptAgent() {
-  if (!state.runId || !state.live) return;
+  if (!canControlRun()) return;
   state.interrupted = true;
-  setAgentStatus("interrupted");
-  addEvent({
-    kind: "err",
-    icon: "■",
-    type: "Interrupted",
-    desc: "Supervisor interrupted the agent",
-    status: "bad",
-  });
-  updateControlButtons();
-  // No cancel API yet: pause → inject stop guidance → resume so it can submit/halt
+  setLiveState("interrupted");
+  addOperatorCard("■", "Interrupted", "Supervisor interrupted the agent");
+  updateControls();
   await fetch(`/api/runs/${state.runId}/pause`, { method: "POST" }).catch(() => {});
   await fetch(`/api/runs/${state.runId}/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      text: "STOP. The human supervisor interrupted this run. Submit your best current answer immediately with submit_answer, or halt.",
-    }),
+    body: JSON.stringify({ text: "STOP. The human supervisor interrupted this run. Submit your best current answer immediately with submit_answer, or halt." }),
   }).catch(() => {});
   await fetch(`/api/runs/${state.runId}/resume`, { method: "POST" }).catch(() => {});
 }
-
-$("btn-continue").addEventListener("click", async () => {
-  state.waiting = false;
-  $("waiting-block").classList.add("hidden");
-  if (state.runId && state.live) {
-    await fetch(`/api/runs/${state.runId}/resume`, { method: "POST" }).catch(() => {});
-  }
-});
-
-$("btn-focus-guidance").addEventListener("click", () => {
-  $("say").focus();
-});
 
 async function sendGuidance() {
   const text = $("say").value.trim();
-  if (!text || !state.runId || !state.live) return;
-  $("say").value = "";
-  await fetch(`/api/runs/${state.runId}/message`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
-  }).catch(() => {});
-  // user_message event comes from server
-  if (state.waiting) {
-    state.waiting = false;
-    $("waiting-block").classList.add("hidden");
-  }
-}
+  if (!text || !canControlRun()) return;
+  const send = $("btn-send");
+  const wasPaused = state.paused;
+  send.disabled = true;
+  send.textContent = "Queueing guidance…";
 
-$("btn-send").addEventListener("click", sendGuidance);
-$("say").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    sendGuidance();
-  }
-});
-
-/** Ready for a future "waiting_for_human" SSE event */
-function enterWaitingForHuman(reason) {
-  state.waiting = true;
-  setAgentStatus("waiting");
-  $("waiting-block").classList.remove("hidden");
-  $("waiting-reason").textContent = reason || "The agent needs your decision to continue.";
-  addEvent({
-    kind: "human",
-    icon: "⚠",
-    type: "Human input requested",
-    desc: reason || "The agent is waiting for supervisor guidance",
-    status: "ok",
-  });
-  $("panel-right").scrollIntoView({ behavior: "smooth", block: "nearest" });
-}
-
-// Expose for future API wiring / console testing
-window.__apexEnterWaiting = enterWaitingForHuman;
-
-// ---------- history ----------
-
-function loadHistory() {
   try {
-    return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
-  } catch {
-    return [];
+    // Hold the next checkpoint before queueing the message. If the current
+    // model turn tries to submit, the harness defers it until this guidance
+    // has been injected.
+    const paused = await fetch(`/api/runs/${state.runId}/pause`, { method: "POST" });
+    if (!paused.ok) throw new Error("could not pause the run");
+
+    const queued = await fetch(`/api/runs/${state.runId}/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!queued.ok) throw new Error("could not queue guidance");
+
+    state.guidancePending = true;
+    $("say").value = "";
+    $("composer-context").classList.add("hidden");
+    $("say").placeholder = "Tell the agent to reconsider…";
+    setLiveState("queued");
+
+    // Only hand control back if the supervisor was not already holding the run.
+    if (!wasPaused) {
+      const resumed = await fetch(`/api/runs/${state.runId}/resume`, { method: "POST" });
+      if (!resumed.ok) throw new Error("could not resume the run");
+      state.paused = false;
+      state.waiting = false;
+      $("waiting-banner").classList.add("hidden");
+    }
+  } catch (error) {
+    addSysCard("!", `Guidance was not delivered: ${error.message}`, true);
+  } finally {
+    send.textContent = "Send Guidance";
+    updateControls();
   }
 }
 
-function saveHistory() {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, 40)));
+function goToSetup() {
+  softStop();
+  showSetupView();
+  syncTaskPanel();
 }
 
-function pushHistory(entry) {
-  state.history.unshift(entry);
-  state.history = state.history.slice(0, 40);
-  saveHistory();
-  renderHistory();
+function canControlRun() {
+  return !!state.runId && !state.runComplete && !state.interrupted;
 }
+
+function updateControls() {
+  const controllable = canControlRun();
+  $("btn-pause-toggle").disabled = !controllable;
+  $("btn-pause-toggle").textContent = state.paused ? "Resume" : "Pause";
+  $("btn-interrupt").disabled = !controllable;
+  $("say").disabled = !controllable;
+  $("btn-send").disabled = !controllable;
+}
+
+function setLiveState(st) {
+  $("live-indicator").dataset.state = st;
+  $("topbar-status").textContent = { running: "Running", queued: "Guidance queued", paused: "Paused", waiting: "Waiting", completed: "Completed", failed: "Failed", interrupted: "Interrupted" }[st] || st;
+  updateControls();
+}
+
+// ===================== DROPDOWNS =====================
+
+function toggleDropdown(id) {
+  if (state.openDropdown === id) { closeDropdowns(); return; }
+  closeDropdowns();
+  $(id).classList.remove("hidden");
+  state.openDropdown = id;
+}
+
+function closeDropdowns() {
+  if (state.openDropdown) $(state.openDropdown).classList.add("hidden");
+  state.openDropdown = null;
+}
+
+// ===================== HISTORY =====================
+
+function loadHistory() { try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]"); } catch { return []; } }
+function saveHistory() { localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, 40))); }
+function pushHistory(entry) { state.history.unshift(entry); state.history = state.history.slice(0, 40); saveHistory(); renderHistory(); }
 
 function renderHistory() {
   const list = $("history-list");
-  if (!state.history.length) {
-    list.innerHTML = `<li class="empty">No runs yet</li>`;
-    return;
+  if (!state.history.length) { list.innerHTML = '<li class="empty">No runs yet</li>'; return; }
+  list.innerHTML = state.history.map((h) => {
+    const dur = h.durationMs != null ? formatDur(h.durationMs) : "—";
+    const when = h.date ? new Date(h.date).toLocaleString() : "";
+    return `<li class="hist-item">
+      <div class="hist-top"><span>${esc(h.runId || "—")}</span><span class="hist-score ${h.scoreOk ? "ok" : "bad"}">${esc(h.score || "—")}</span></div>
+      <div class="hist-meta"><span>${esc(h.task || "—")}</span><span>${esc(h.model || h.provider || "—")}</span><span>${esc(h.status || "—")}</span><span>${esc(dur)}</span></div>
+      <div class="hist-meta">${esc(when)}</div>
+    </li>`;
+  }).join("");
+}
+
+function openHistory() { $("history-drawer").classList.remove("hidden"); $("history-drawer").setAttribute("aria-hidden", "false"); }
+function closeHistory() { $("history-drawer").classList.add("hidden"); $("history-drawer").setAttribute("aria-hidden", "true"); }
+function closeEval() { $("eval-drawer").classList.add("hidden"); $("eval-drawer").setAttribute("aria-hidden", "true"); }
+
+// ===================== WAITING (for future SSE event) =====================
+
+function enterWaitingForHuman(reason) {
+  state.waiting = true;
+  setLiveState("waiting");
+  $("waiting-banner").classList.remove("hidden");
+  $("waiting-reason").textContent = reason || "";
+}
+window.__apexEnterWaiting = enterWaitingForHuman;
+
+// ===================== KEYBOARD =====================
+
+function bindKeyboard() {
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    const steps = [...state.stepCards.keys()].sort((a, b) => a - b);
+    if (!steps.length) return;
+
+    if (e.key === "j" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const idx = steps.indexOf(state.focusedStep);
+      const next = steps[Math.min(idx + 1, steps.length - 1)];
+      focusStep(next);
+    } else if (e.key === "k" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const idx = steps.indexOf(state.focusedStep);
+      const prev = steps[Math.max(idx - 1, 0)];
+      focusStep(prev);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (state.focusedStep) toggleStep(state.focusedStep);
+    } else if (e.key === "f") {
+      e.preventDefault();
+      if (state.focusedStep) {
+        const sc = state.stepCards.get(state.focusedStep);
+        if (sc) {
+          const lastTool = [...state.toolData.values()].filter((td) => td.step === state.focusedStep).pop();
+          if (lastTool) handleReviewAction("flag", [...state.toolData.entries()].find(([, v]) => v === lastTool)?.[0], state.focusedStep, lastTool.name);
+        }
+      }
+    } else if (e.key === "/") {
+      e.preventDefault();
+      $("say").focus();
+    }
+  });
+}
+
+function focusStep(stepNum) {
+  // Unfocus previous
+  if (state.focusedStep) {
+    const prev = state.stepCards.get(state.focusedStep);
+    if (prev) prev.el.style.outline = "";
   }
-  list.innerHTML = state.history
-    .map((h) => {
-      const dur = h.durationMs != null ? formatDur(h.durationMs) : "—";
-      const when = h.date ? new Date(h.date).toLocaleString() : "";
-      return `<li class="hist-item">
-        <div class="hist-top">
-          <span>${esc(h.runId || "—")}</span>
-          <span class="hist-score ${h.scoreOk ? "ok" : "bad"}">${esc(h.score || "—")}</span>
-        </div>
-        <div class="hist-meta">
-          <span>${esc(h.task || "—")}</span>
-          <span>${esc(h.model || h.provider || "—")}</span>
-          <span>${esc(h.status || "—")}</span>
-          <span>${esc(dur)}</span>
-        </div>
-        <div class="hist-meta">${esc(when)}</div>
-      </li>`;
-    })
-    .join("");
+  state.focusedStep = stepNum;
+  const card = state.stepCards.get(stepNum);
+  if (card) {
+    card.el.style.outline = "2px solid var(--accent)";
+    card.el.style.outlineOffset = "-2px";
+    card.el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 }
 
-$("btn-clear-history").addEventListener("click", () => {
-  state.history = [];
-  saveHistory();
-  renderHistory();
-});
+// ===================== SCROLL =====================
 
-// ---------- utils ----------
-
-function nowTime() {
-  return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+function scrollToBottom() {
+  const rail = $("step-rail");
+  rail.scrollTop = rail.scrollHeight;
 }
 
-function basename(p) {
-  const s = String(p || "");
-  const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
-  return i >= 0 ? s.slice(i + 1) : s;
-}
+// ===================== UTILS =====================
 
-function formatDur(ms) {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}m ${r}s`;
-}
-
-function shortArgs(name, args) {
-  if (name === "run_python") return args.code || "";
-  return JSON.stringify(args, null, 2);
-}
-
-function clip(s, n) {
-  s = String(s ?? "");
-  return s.length > n ? s.slice(0, n) + "…" : s;
-}
-
-function esc(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function escAttr(s) {
-  return esc(s).replace(/"/g, "&quot;");
-}
+function nowTime() { return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }); }
+function basename(p) { const s = String(p || ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\")); return i >= 0 ? s.slice(i + 1) : s; }
+function formatDur(ms) { const s = Math.round(ms / 1000); if (s < 60) return `${s}s`; return `${Math.floor(s / 60)}m ${s % 60}s`; }
+function formatTokens(n) { return n >= 1000 ? `${(n / 1000).toFixed(1)}k tok` : `${n} tok`; }
+function shortArgs(name, args) { return name === "run_python" ? (args.code || "") : JSON.stringify(args, null, 2); }
+function clip(s, n) { s = String(s ?? ""); return s.length > n ? s.slice(0, n) + "…" : s; }
+function esc(s) { return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function escAttr(s) { return esc(s).replace(/"/g, "&quot;"); }
 
 boot();

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
-APEX = REPO / "apex_accounting_data"
+APEX = REPO / "apex-accounting"
 WORLD_FS = APEX / "world" / "filesystem"
 APPS_DATA = APEX / "world" / "apps_data" / "quickbooks"
 TASKS_DIR = APEX / "tasks"
